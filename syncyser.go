@@ -1,12 +1,14 @@
 package main
 
 import (
+	"fmt"
 	"net"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/go-sql-driver/mysql"
+	_ "github.com/go-sql-driver/mysql"
 	"github.com/golang/glog"
 	"github.com/jinzhu/gorm"
 )
@@ -27,9 +29,9 @@ var (
 )
 
 var (
-	Skip   int = 1
-	Update int
-	Insert int
+	skip   int = 1
+	update int
+	insert int
 )
 
 type mysqlUser struct {
@@ -38,7 +40,7 @@ type mysqlUser struct {
 }
 
 type Proxy struct {
-	DB *gorm.DB `gorm:"-" json:"-"`
+	DB *gorm.DB
 }
 type proxyUser struct {
 	UserName string `gorm:"column:username" json:"username"`
@@ -50,18 +52,32 @@ func (p *Proxy) TableName() string {
 }
 
 func (p *Proxy) loadToRuntimeSaveToDisk() {
-	p.DB.Raw("LOAD MYSQL USERS TO RUNTIME;")
-	p.DB.Raw("SAVE MYSQL USERS TO DISK;")
+	if err := p.DB.Exec("LOAD MYSQL USERS TO RUNTIME;").Error; err != nil {
+		glog.Error(err)
+	}
+
+	if err := p.DB.Exec("SAVE MYSQL USERS TO DISK;").Error; err != nil {
+		glog.Error(err)
+	}
 }
 
-func (p *Proxy) insertOrUpdate(pu proxyUser) {
-	// err := p.DB.Table(p.TableName()).Where("username", pu.UserName).Update(pu).Error
-	err := p.DB.Table(p.TableName()).Raw(`update myql_users set password="*06C0BF5B64ECE2F648B5F048A71903906BA08E5C" where username='testinsert';`).Error
-	glog.Info(err)
+func (p *Proxy) Update(pu proxyUser) {
+	if err := p.DB.Exec(fmt.Sprintf(`update mysql_users set password='%s' where username='%s';`, pu.PassWord, pu.UserName)).Error; err != nil {
+		glog.Error(err)
+	}
+
+}
+
+func (p *Proxy) Insert(pu proxyUser) {
+	sql := fmt.Sprintf(`Insert into mysql_users(username, password,default_hostgroup) VALUES('%s','%s',1);`, pu.UserName, pu.PassWord)
+	err := p.DB.Exec(sql).Error
+	if err != nil {
+		glog.Error(err)
+	}
 }
 func (p *Proxy) proxyUsers() ([]proxyUser, error) {
 	var proxyUsers []proxyUser
-	if err := p.DB.Table(p.TableName()).Select("username", "password").Where("password !=''").Not("username", []string{"root"}).Scan(&proxyUsers).Error; err != nil {
+	if err := p.DB.Raw(`select username,password from mysql_users where password !=''`).Scan(&proxyUsers).Error; err != nil {
 		glog.Error(err)
 		return nil, err
 	}
@@ -109,8 +125,8 @@ func newPorxy() *Proxy {
 		Passwd:               proxyAdmin,
 		Net:                  "tcp",
 		Addr:                 net.JoinHostPort("127.0.0.1", "6032"),
-		Loc:                  time.Now().Local().Location(),
-		DBName:               "mysql",
+		Loc:                  time.UTC,
+		DBName:               "",
 		Params:               map[string]string{"charset": "utf8"},
 		ParseTime:            true,
 		AllowNativePasswords: true,
@@ -119,12 +135,13 @@ func newPorxy() *Proxy {
 	if err != nil {
 		panic(err)
 	}
+
 	return &Proxy{DB: db}
 
 }
 func main() {
-	proxy := newPorxy()
 	ticker := time.NewTicker(time.Second * time.Duration(defaultSyncPeriod))
+	proxy := newPorxy()
 	for _ = range ticker.C {
 
 		mySQLUsers, err := mysqlServerUsers()
@@ -133,29 +150,30 @@ func main() {
 			continue
 		}
 		if len(mySQLUsers) == 0 {
-			glog.Infof("users in %s should be updated is 0 ", os.Getenv("DAASSERVICE"))
+			glog.Warningf("users in %s should be updated is 0 ", os.Getenv("DAASSERVICE"))
 			continue
 
 		}
-		// users, err := proxy.proxyUsers()
-		// if err != nil {
-		// 	glog.Error(err)
-		// 	continue
-		// }
-		// proxyUserMap := make(map[string]string)
-		// for _, u := range users {
-		// 	proxyUserMap[u.UserName] = u.PassWord
-		// }
+		users, err := proxy.proxyUsers()
+		if err != nil {
+			glog.Error(err)
+			continue
+		}
+		proxyUserMap := make(map[string]string)
+		for _, u := range users {
+			proxyUserMap[u.UserName] = u.PassWord
+		}
 
 		for u, p := range mySQLUsers {
-			glog.Infof("userName: %s,  password %s", u, p)
-			proxy.insertOrUpdate(proxyUser{UserName: u, PassWord: p})
-			// proxyUserMap[u] = p
-			// if pp, exist := proxyUserMap[u]; exist {
-			// 	if pp == mp {
-			// 		continue
-			// 	}
-			// }
+			glog.V(4).Infof("mysqluser: %s", u)
+			if pp, exists := proxyUserMap[u]; exists {
+				if pp == p {
+					continue
+				}
+				proxy.Update(proxyUser{UserName: u, PassWord: p})
+			}
+			proxy.Insert(proxyUser{UserName: u, PassWord: p})
+
 		}
 		proxy.loadToRuntimeSaveToDisk()
 
