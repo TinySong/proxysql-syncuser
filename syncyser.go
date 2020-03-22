@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"os"
@@ -11,6 +12,7 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/golang/glog"
 	"github.com/jinzhu/gorm"
+	utilexec "k8s.io/utils/exec"
 )
 
 // sync user info from mysqlserver, and insert new user into proxysql
@@ -27,6 +29,8 @@ var (
 	defaultHostGroup  = 1
 	defaultSyncPeriod = 5
 )
+
+const defaultTimeout = 10 * time.Second
 
 var (
 	skip   int = 1
@@ -84,6 +88,12 @@ func (p *Proxy) proxyUsers() ([]proxyUser, error) {
 	return proxyUsers, nil
 }
 
+func (p *Proxy) CheckAlive() {
+	if p.DB.DB().Ping() != nil {
+		p = newPorxy()
+	}
+}
+
 func mysqlServerUsers() (map[string]string, error) {
 	c := mysql.Config{
 		User:   "root",
@@ -131,19 +141,25 @@ func newPorxy() *Proxy {
 		ParseTime:            true,
 		AllowNativePasswords: true,
 	}
+
+	ctx, _ := context.WithCancel(context.Background())
+	for !isDatabaseRunning(ctx) {
+		glog.Infof("proxysql not yet running. Waiting 2 seconds ...")
+		time.Sleep(time.Second * time.Duration(2))
+	}
+
+	glog.Info("create proxysql client")
 	db, err := gorm.Open("mysql", c.FormatDSN())
 	if err != nil {
 		panic(err)
 	}
-
 	return &Proxy{DB: db}
-
 }
+
 func main() {
 	ticker := time.NewTicker(time.Second * time.Duration(defaultSyncPeriod))
 	proxy := newPorxy()
 	for _ = range ticker.C {
-
 		mySQLUsers, err := mysqlServerUsers()
 		if err != nil {
 			glog.Error(err)
@@ -165,7 +181,7 @@ func main() {
 		}
 
 		for u, p := range mySQLUsers {
-			glog.V(4).Infof("mysqluser: %s", u)
+			glog.V(3).Infof("mysqluser: %s", u)
 			if pp, exists := proxyUserMap[u]; exists {
 				if pp == p {
 					continue
@@ -179,4 +195,21 @@ func main() {
 
 	}
 
+}
+
+func isDatabaseRunning(ctx context.Context) bool {
+	ctx, cancel := context.WithTimeout(ctx, defaultTimeout)
+	defer cancel()
+	err := utilexec.New().CommandContext(ctx,
+		"mysqladmin",
+		"--protocol", "tcp",
+		"-u", "root",
+		os.ExpandEnv("-p$MYSQL_ROOT_PASSWORD"),
+		"status",
+	).Run()
+	if err != nil {
+		glog.Error(err)
+	}
+	glog.Info("isDatabaseRunning is alive")
+	return err == nil
 }
