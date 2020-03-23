@@ -44,7 +44,8 @@ type mysqlUser struct {
 }
 
 type Proxy struct {
-	DB *gorm.DB
+	DB     *gorm.DB
+	Reload bool
 }
 type proxyUser struct {
 	UserName string `gorm:"column:username" json:"username"`
@@ -69,7 +70,7 @@ func (p *Proxy) Update(pu proxyUser) {
 	if err := p.DB.Exec(fmt.Sprintf(`update mysql_users set password='%s' where username='%s';`, pu.PassWord, pu.UserName)).Error; err != nil {
 		glog.Error(err)
 	}
-
+	p.Reload = true
 }
 
 func (p *Proxy) Insert(pu proxyUser) {
@@ -78,6 +79,7 @@ func (p *Proxy) Insert(pu proxyUser) {
 	if err != nil {
 		glog.Error(err)
 	}
+	p.Reload = true
 }
 func (p *Proxy) proxyUsers() ([]proxyUser, error) {
 	var proxyUsers []proxyUser
@@ -191,8 +193,9 @@ func main() {
 			proxy.Insert(proxyUser{UserName: u, PassWord: p})
 
 		}
-		proxy.loadToRuntimeSaveToDisk()
-
+		if proxy.Reload {
+			proxy.loadToRuntimeSaveToDisk()
+		}
 	}
 
 }
